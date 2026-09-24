@@ -96,8 +96,38 @@ class CriticAgent(BaseAgent):
                 return False
         return True
 
-    def _generate_independent_answer(self, question: str, round_id: int, benchmark):
+    def prepare_independent(self, question: str, round_id: int, benchmark, peers=None) -> int:
+        """Produce the critic's own answer for this round and return its token cost.
+
+        Round 0 (or peers=None): solve blind, exactly as before.
+        Later rounds in live mode: re-solve after seeing its previous answer and the two
+        solvers' current solutions, so the critic can change its mind (it was frozen before).
+        """
+        if peers is None or self._independent_answer is None:
+            extra = ""
+        else:
+            prev = self._independent_answer
+            lines = [
+                "\n\nDEBATE SO FAR:",
+                f"Your previous answer: {prev.action}",
+                f"Your previous steps: {prev.get_reasoning_text()[:1500]}",
+            ]
+            for name, m in zip(("Solver A", "Solver B"), peers):
+                lines.append(f"{name} now answers: {m.action}")
+                lines.append(f"{name} steps: {m.get_reasoning_text()[:1500]}")
+            lines.append(
+                "Solve the problem again yourself. Keep your previous answer unless you can point "
+                "to a concrete error in your own steps; if you change it, your new steps must "
+                "support the new answer. Agreeing with the solvers is not a reason by itself."
+            )
+            extra = "\n".join(lines)
+        ind_msg, tokens = self._generate_independent_answer(question, round_id, benchmark, extra)
+        self._independent_answer = ind_msg
+        return tokens
+
+    def _generate_independent_answer(self, question: str, round_id: int, benchmark, extra: str = ""):
         prompt_ind = benchmark.build_independent_prompt(question)
+        prompt_ind += extra
         prompt_ind += _CALIBRATION_SUFFIX
         raw_ind, tokens_ind = self.call_llm(prompt_ind)
 

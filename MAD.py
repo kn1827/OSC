@@ -1,23 +1,30 @@
 """
-run_multi_agent_debate.py
+MAD.py
 
 Chạy thí nghiệm debate THẬT: 2 solver (Qwen + Llama, local qua Ollama) +
 1 critic (Gemma3, local qua Ollama), trên N câu hỏi của
-1 hoặc nhiều benchmark (gsm8k, strategyqa, mmlu), tối đa n vòng mỗi câu.
+1 hoặc nhiều benchmark (gsm8k, strategyqa, mmlu, commonsenseqa, truthfulqa, bbh),
+tối đa n vòng mỗi câu.
 
-Output cho mỗi benchmark, trong results/logs/<task>/seed<seed>/:
+Output cho mỗi benchmark, trong <log_root>/<task>/seed<seed>/:
   debate_full_<timestamp>.jsonl
       1 dòng JSON / câu hỏi — TOÀN BỘ debate: mọi vòng, mọi agent (answer,
-      normalized_answer, confidence, reasoning, verdict của critic), 4 raw
-      feature + consensus mỗi vòng, final_answer, final_correct, total_tokens,
-      ground_truth, seed.
-      Đây là nguồn chân lý DUY NHẤT — mọi script phân tích đọc file này qua
-      logio.load_rounds() (không còn debate_rounds/debate_agents CSV).
+      normalized_answer, confidence, reasoning, verdict của critic), consensus và
+      token theo từng lượt gọi mỗi vòng, final_answer, final_correct, total_tokens,
+      ground_truth, seed. osc/ đọc thẳng file này (osc.data.load_debates).
 
 Usage:
-    python run_multi_agent_debate.py --task gsm8k --n 100 --max_rounds 6
-    python run_multi_agent_debate.py --task all --n 100 --max_rounds 6
-    python run_multi_agent_debate.py --task strategyqa --n 100 --resume
+    python MAD.py --task gsm8k --n 100 --max_rounds 6
+    python MAD.py --task all --n 100 --max_rounds 6
+    python MAD.py --task strategyqa --n 100 --resume
+
+OSC workflow (see README.md):
+    1. collect full debates:  python MAD.py --task all --n 300 --seed 1 --stop none --log_root results/logs_osc
+    2. evaluate + train:      python -m osc.evaluate / python -m osc.train
+    3. run with OSC:          python MAD.py --task gsm8k --stop osc --osc_policy results/osc/policy_{task}.json
+    4. re-check guarantee:    python -m osc.monitor
+    VERIFY action (PLAN_OSC_V.md): after step 1 run python -m osc.verify_offline, then train with
+    python -m osc.train --verify_logs ...; step 3 then also calls --verifier_config when needed.
 """
 
 import argparse
@@ -27,6 +34,7 @@ import os
 import random
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from src.orchestrator import MADOrchestrator
@@ -42,7 +50,7 @@ SOLVER_B_CONFIG = "config/model_config_solver_llama.yaml"  # Solver B = Llama
 CRITIC_CONFIG  = "config/model_config_critic_gemma.yaml"   # Critic = Gemma3
 CRITIC_CONFIGS = [CRITIC_CONFIG]                            
 
-ALL_TASKS = ["gsm8k", "strategyqa", "mmlu"]
+ALL_TASKS = ["gsm8k", "strategyqa", "mmlu", "commonsenseqa", "truthfulqa", "bbh"]
 
 
 def load_samples(task: str, n: int, seed: int) -> list:
@@ -80,13 +88,16 @@ def load_completed_ids(jsonl_path: Path) -> set:
     return done
 
 
-def run_task(task: str, n: int, max_rounds: int, seed: int, resume: bool, early_stop: bool):
+def run_task(task: str, n: int, max_rounds: int, seed: int, resume: bool, stop_policy: str,
+             critic_mode: str = "frozen", osc_policy: str | None = None, audit_rate: float = 0.0,
+             log_root: str = "results/logs", verifier_config: str | None = None,
+             configs: tuple | None = None, workers: int = 1):
     # base_agent._call_ollama doc MAD_SEED de seed sampling => moi seed = 1 rollout doc lap, tai lap duoc.
     os.environ["MAD_SEED"] = str(seed)
     # Tach log theo seed: khong de 2 seed ghi de nhau, va tranh dung sample_id
     # (sample_id = index cau hoi) va cham nhau khi phan tich. --resume cung tu dong
     # gioi han trong dung seed nay (load_completed_ids doc theo jsonl_path.parent).
-    out_dir = Path(f"results/logs/{task}/seed{seed}")
+    out_dir = Path(f"{log_root}/{task}/seed{seed}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -99,31 +110,43 @@ def run_task(task: str, n: int, max_rounds: int, seed: int, resume: bool, early_
     samples = load_samples(task, n, seed)
     samples = [(i, s) for i, s in samples if i not in completed]
 
+    solver_a_cfg, solver_b_cfg, critic_cfgs = configs or (SOLVER_A_CONFIG, SOLVER_B_CONFIG, CRITIC_CONFIGS)
     orchestrator = MADOrchestrator(
         task=task,
-        solver_a_config_path=SOLVER_A_CONFIG,
-        solver_b_config_path=SOLVER_B_CONFIG,
-        critic_config_paths=CRITIC_CONFIGS,
+        solver_a_config_path=solver_a_cfg,
+        solver_b_config_path=solver_b_cfg,
+        critic_config_paths=critic_cfgs,
         max_rounds=max_rounds,
-        early_stop_on_consensus=early_stop,
+        stop_policy=stop_policy,
+        critic_mode=critic_mode,
+        osc_policy_path=osc_policy.format(task=task) if osc_policy else None,
+        audit_rate=audit_rate,
+        audit_seed=seed,
+        verifier_config_path=verifier_config,
     )
 
     n_correct, n_done = 0, 0
 
-    with open(jsonl_path, "a", encoding="utf-8") as jf:
-        for i, (sample_id, sample) in enumerate(samples, 1):
-            question = sample["question"]
-            gt = sample.get("answer")
+    def one(sample_id, sample):
+        t0 = time.time()
+        record = orchestrator.run(sample_id=sample_id, question=sample["question"],
+                                  ground_truth=sample.get("answer"))
+        record["seed"] = seed
+        return record, time.time() - t0
 
-            t0 = time.time()
+    # --workers > 1: several questions in flight at once (an OpenAI-compatible server such as
+    # vLLM batches them). Each question gets fresh agents, so questions never share state;
+    # records are written as they finish, so the file order differs from the question order.
+    with open(jsonl_path, "a", encoding="utf-8") as jf, \
+            ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        futures = {ex.submit(one, sid, s): sid for sid, s in samples}
+        for i, fut in enumerate(as_completed(futures), 1):
+            sample_id = futures[fut]
             try:
-                record = orchestrator.run(sample_id=sample_id, question=question, ground_truth=gt)
+                record, dt = fut.result()
             except Exception as e:
                 logger.error(f"[{task}] Sample {sample_id} lỗi: {e} → bỏ qua")
                 continue
-            dt = time.time() - t0
-
-            record["seed"] = seed
             jf.write(json.dumps(record, ensure_ascii=False) + "\n")
             jf.flush()
 
@@ -151,7 +174,31 @@ def main():
     p.add_argument("--seed", type=int, default=42, help="Random seed for sampling n questions")
     p.add_argument("--resume", action="store_true", help="Skip sample_id that have already been run (read from existing jsonl)")
     p.add_argument("--no_early_stop", action="store_true",
-                    help="Always run for max_rounds, don't stop early when 3 agents agree")
+                    help="Same as --stop none (kept for old commands)")
+    p.add_argument("--stop", choices=["consensus", "none", "osc"], default=None,
+                   help="consensus = stop when all 3 agree (old default); none = always run "
+                        "max_rounds (collect OSC training data); osc = OSC policy (needs --osc_policy)")
+    p.add_argument("--critic_mode", choices=["frozen", "live"], default="live",
+                   help="live (default) = critic re-solves every round; frozen = old behaviour, "
+                        "critic answer fixed after round 0")
+    p.add_argument("--osc_policy", default=None,
+                   help="policy json from `python -m osc.train`; '{task}' is replaced, e.g. "
+                        "results/osc/policy_{task}.json")
+    p.add_argument("--audit_rate", type=float, default=0.05,
+                   help="with --stop osc: share of questions run to max_rounds to re-check the "
+                        "guarantee (osc.monitor)")
+    p.add_argument("--log_root", default="results/logs",
+                   help="where debate logs go; use a new folder per model setup, e.g. results/logs_osc")
+    p.add_argument("--verifier_config", default="config/model_config_verifier.yaml",
+                   help="verifier model, used only when the OSC policy has a certified VERIFY "
+                        "setting (python -m osc.train --verify_logs ...)")
+    p.add_argument("--workers", type=int, default=1,
+                   help="questions run in parallel (use >1 with a vLLM / API backend; Ollama "
+                        "serves one request at a time unless OLLAMA_NUM_PARALLEL is set)")
+    p.add_argument("--solver_a_config", default=SOLVER_A_CONFIG)
+    p.add_argument("--solver_b_config", default=SOLVER_B_CONFIG)
+    p.add_argument("--critic_config", nargs="+", default=CRITIC_CONFIGS,
+                   help="one or more critic configs (rotated by sample_id)")
     p.add_argument("--verbose", action="store_true", help="Log detailed information for each agent/round")
 
     # --- no-debate baselines
@@ -175,23 +222,33 @@ def main():
         logging.getLogger().setLevel(logging.INFO)
 
     tasks = ALL_TASKS if args.task == "all" else [args.task]
+    configs = (args.solver_a_config, args.solver_b_config, list(args.critic_config))
     for task in tasks:
         if args.majority_voting:
-            from mv_baseline import run_majority_vote_task
+            from baselines.no_debate import run_majority_vote_task
             run_majority_vote_task(
                 task=task, n=args.n, seed=args.seed, resume=args.resume,
                 n_votes=args.mv_votes, load_samples=load_samples,
-                configs=(SOLVER_A_CONFIG, SOLVER_B_CONFIG, CRITIC_CONFIGS),
-                sc_model=args.sc_model,
+                configs=configs, sc_model=args.sc_model, workers=args.workers,
             )
             continue
+        stop = args.stop or ("none" if args.no_early_stop else "consensus")
+        if stop == "osc" and not args.osc_policy:
+            p.error("--stop osc needs --osc_policy")
         run_task(
             task=task,
             n=args.n,
             max_rounds=args.max_rounds,
             seed=args.seed,
             resume=args.resume,
-            early_stop=not args.no_early_stop,
+            stop_policy=stop,
+            critic_mode=args.critic_mode,
+            osc_policy=args.osc_policy,
+            audit_rate=args.audit_rate if stop == "osc" else 0.0,
+            log_root=args.log_root,
+            verifier_config=args.verifier_config,
+            configs=configs,
+            workers=args.workers,
         )
 
 

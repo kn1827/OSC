@@ -1,0 +1,19 @@
+# vLLM (OpenAI-compatible) config — started by kaggle/start_vllm.sh on port 8002.
+# Solver B (Llama family).
+model:
+  provider: vllm
+  name: hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4
+  base_url: http://localhost:8002/v1
+  temperature: 0.3
+  max_tokens: 1024
+  top_p: 1.0
+agents:
+  solver:
+    temperature: 0.3
+    max_tokens: 1024
+  critic:
+    temperature: 0.2
+    max_tokens: 768
+  verifier:
+    temperature: 0.0
+    max_tokens: 768

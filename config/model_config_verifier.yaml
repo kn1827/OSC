@@ -1,0 +1,13 @@
+# Verifier for the OSC VERIFY action (src/agents/verifier.py).
+# Placeholder model: prefer a family that is NOT among the debaters (qwen2.5 / llama3.1 / gemma2),
+# since a verifier from the same family tends to share their blind spots (tau0 close to tau1).
+model:
+  provider: ollama
+  name: mistral-nemo:12b
+  temperature: 0.0
+  max_tokens: 768
+  top_p: 1.0
+agents:
+  verifier:
+    temperature: 0.0
+    max_tokens: 768

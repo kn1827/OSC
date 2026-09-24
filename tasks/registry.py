@@ -41,3 +41,6 @@ def list_benchmarks():
 from .gsm8k.config import GSM8KConfig                      # noqa: F401, E402
 from .strategyqa.config import StrategyQAConfig            # noqa: F401, E402
 from .mmlu.config import MMLUConfig                        # noqa: F401, E402
+from .commonsenseqa.config import CommonsenseQAConfig      # noqa: F401, E402
+from .truthfulqa.config import TruthfulQAConfig            # noqa: F401, E402
+from .bbh.config import BBHConfig                          # noqa: F401, E402

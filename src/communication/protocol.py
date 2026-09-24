@@ -91,6 +91,10 @@ def _extract_action_fallback(raw: str, role: str) -> str:
         mm = re.search(r"[A-Ea-e]", val)
         return mm.group(0).upper() if mm else "A"
 
+    if role == "solver_letter":
+        from tasks.choice import extract_letter
+        return extract_letter(val or raw)
+
     low = val.lower()
     if role in ("solver", "judge"):
         if "yes" in low or "no" in low:
@@ -179,7 +183,7 @@ def build_compact_prompt(question: str, answer_format: str) -> str:
         fmt = ('{"reasoning":["..."],"action":"yes or no",'
                '"confidence":0.9,"content":"one sentence"}')
     else:
-        fmt = ('{"reasoning":["..."],"action":"<single letter A-E>",'
+        fmt = ('{"reasoning":["..."],"action":"<letter of one listed option>",'
                '"confidence":0.9,"content":"one sentence"}')
     return (
         "Solve the problem below. Respond with ONLY one JSON object and nothing else. "
@@ -252,6 +256,18 @@ def parse_agent_response(
                 reasoning_text = " ".join(str(r) for r in data.get("reasoning", []))
                 all_matches = re.findall(r"\b([A-Ea-e])\b", reasoning_text)
                 action = all_matches[-1].upper() if all_matches else "A"
+
+    elif role == "solver_letter":
+        # option letters A-R (BBH has up to 18 options); fall back to content, then reasoning
+        from tasks.choice import LETTERS, extract_letter
+        for source in (action, str(data.get("content", "")),
+                       " ".join(str(r) for r in data.get("reasoning", []))):
+            letter = extract_letter(source)
+            if len(letter) == 1 and letter in LETTERS:
+                action = letter
+                break
+        else:
+            action = "A"
 
     elif role in ("solver"):
         if "yes" in action:

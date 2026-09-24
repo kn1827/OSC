@@ -119,6 +119,44 @@ class BenchmarkConfig(ABC):
             critic_independent=critic_ind_r0,
         )
 
+    # ── Verifier (OSC VERIFY action) ─────────────────────────────────────────
+
+    def answer_hint(self) -> str:
+        """How a final answer is written for this task (shown to the verifier)."""
+        return {
+            "number": "a single number, no units",
+            "yes or no": "yes or no",
+            "letter": "the letter of one listed option",
+        }.get(self.answer_format, "a short answer")
+
+    def build_verifier_prompt(self, question: str, answer: str,
+                              reasoning: Optional[List[str]] = None) -> str:
+        """Ask for a pass/fail verdict on ONE proposed answer.
+
+        reasoning=None is the blind mode: the verifier sees only the question and the answer,
+        so it cannot inherit the debate's line of argument. With reasoning it also judges the
+        steps offered for the answer. Either way it must solve the problem itself first."""
+        shown = ""
+        if reasoning:
+            steps = "\n".join(f"  {i + 1}. {s}" for i, s in enumerate(reasoning))[:2500]
+            shown = f"\nReasoning offered for it:\n{steps}\n"
+        return (
+            "You are an independent verifier. Decide whether the PROPOSED ANSWER to the question "
+            "below is correct.\n\n"
+            f"Question:\n{question}\n\n"
+            f"PROPOSED ANSWER: {answer}\n{shown}\n"
+            "Procedure:\n"
+            "1. Solve the question yourself, briefly and step by step, BEFORE judging.\n"
+            "2. Compare your result with the proposed answer"
+            + (" and check each offered step.\n" if reasoning else ".\n")
+            + "3. Say 'pass' only if the proposed answer is correct. Being proposed, popular or "
+            "confidently stated is not evidence.\n\n"
+            "Output ONLY a JSON object:\n"
+            '{"check":["my step 1","my step 2"],"own_answer":"<your answer>",'
+            '"verdict":"pass or fail","confidence":0.0-1.0,"issue":"one sentence, empty if pass"}\n'
+            f'"own_answer" must be {self.answer_hint()}. "verdict" must be exactly "pass" or "fail".'
+        )
+
     def verifier_settings(self) -> dict:
         return {
             "check_arithmetic": True,

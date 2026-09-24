@@ -1,0 +1,19 @@
+# vLLM (OpenAI-compatible) config — started by kaggle/start_vllm.sh on port 8001.
+# Solver A (Qwen family).
+model:
+  provider: vllm
+  name: Qwen/Qwen2.5-7B-Instruct-AWQ
+  base_url: http://localhost:8001/v1
+  temperature: 0.3
+  max_tokens: 1024
+  top_p: 1.0
+agents:
+  solver:
+    temperature: 0.3
+    max_tokens: 1024
+  critic:
+    temperature: 0.2
+    max_tokens: 768
+  verifier:
+    temperature: 0.0
+    max_tokens: 768

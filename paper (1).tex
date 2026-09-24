@@ -1,0 +1,344 @@
+% This is based on samplepaper.tex, demonstrating the
+% LLNCS macro package for Springer Computer Science proceedings.
+%
+\documentclass{llncs}
+%
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage{tabularx}
+\usepackage{float}
+\usepackage{enumitem}
+
+\begin{document}
+\raggedbottom
+
+\title{Rethinking Adaptive Stopping in Multi-Agent Debate: From Predictive Signals to Operational Value}
+
+\titlerunning{Rethinking Adaptive Stopping in Multi-Agent Debate}
+
+\author{Ngoc Nguyen Thuy Khanh\textsuperscript{1,2}, Truc Nguyen Thi Le\textsuperscript{1,2}, Ngoc Hoang Le\textsuperscript{3}, Phung-Anh Nguyen\textsuperscript{4}, and Phuoc Nguyen T. H.\textsuperscript{1,2,*}}
+
+\authorrunning{Ngoc et al.}
+
+\institute{
+University of Information Technology, Ho Chi Minh City, Vietnam\\
+\and
+Vietnam National University Ho Chi Minh City, Ho Chi Minh City, Vietnam\\
+\and
+Graduate Institute of Biomedical Materials and Tissue Engineering, College of Biomedical Engineering, Taipei Medical University, New Taipei City, Taiwan\\
+\and
+Graduate Institute of Data Science, College of Management, Taipei Medical University, New Taipei City, Taiwan\\
+Contributing authors: \email{25521211@gm.uit.edu.vn, 23521670@gm.uit.edu.vn, d825113002@tmu.edu.tw, alex0303@tmu.edu.tw} \\
+\textsuperscript{*}Corresponding author: \email{phuocnth@uit.edu.vn}
+}
+
+\date{}
+
+\maketitle
+
+
+\begin{abstract}
+Multi-Agent Debate (MAD) can improve LLM reasoning, but its cost increases with the number of agents and debate rounds. This makes early stopping important, but evaluating a stopping rule is not straightforward. We show that a rule can appear to save computation when compared with full-depth debate, even though it provides no additional saving over the stopping mechanism already in use. Across 4,500 debates, our initial consensus-based stopping score shows 33.9\% apparent savings under full-depth evaluation, but sequential evaluation against consensus yields zero incremental savings, revealing a circularity in the original evaluation. We therefore introduce an incumbent-aware evaluation protocol that counts savings only when a new policy stops earlier than the existing one. Under this protocol, seven critic-relative signals achieve an ROC-AUC of 0.729, compared with 0.705 for four consensus-dynamics signals. Combining these signals in a two-stage DUS-11 cascade reduces token cost by 41.1\% on MMLU relative to consensus, with no statistically detectable accuracy change. However, better prediction does not always lead to a better stopping policy: a simple fixed two-round strategy achieves statistically indistinguishable accuracy while using fewer tokens than the cascade on all three benchmarks. Our results show that adaptive stopping is useful only when the existing policy leaves enough computation to remove, still makes meaningful errors, and additional debate can correct those errors. We release all debate logs, evaluation protocols, and analysis code.
+
+\keywords{Multi-agent debate \and Large language models \and Adaptive inference \and Critic-relative signals \and Computational efficiency.}
+\end{abstract}
+
+
+\section{Introduction}
+\label{sec:intro_gain}
+
+Multi-Agent Debate (MAD) has emerged as an effective inference-time paradigm for improving the reasoning and reliability of large language models (LLMs). By allowing multiple agents to propose solutions, exchange critiques, and iteratively revise their decisions, MAD can improve upon single-generation reasoning \cite{ref_1,ref_2,ref_3}. Recent work has extended this paradigm through alternative communication structures, heterogeneous agent roles, confidence-aware aggregation, and debate-based evaluation \cite{ref_4,ref_5,ref_6,ref_7,ref_8}. These benefits, however, come at increasing inference cost as both the number of agents and interaction rounds grow, motivating adaptive stopping once further debate is unlikely to improve the outcome \cite{ref_3,ref_9}. Existing approaches typically rely on agreement, confidence, convergence, or decision stability, while related strategies such as self-consistency allocate additional computation through independent sampling \cite{ref_10}. The practical value of adaptive stopping therefore depends not only on predictive accuracy, but on whether it removes computation that would otherwise be incurred.
+
+This exposes an important evaluation issue. Adaptive stopping is often evaluated against full-depth execution, measuring savings relative to running every debate to its maximum depth \cite{ref_9}. This comparison can overstate operational savings when the deployed system already uses an incumbent termination rule such as consensus. If the incumbent stops at round $r$, a candidate policy that fires at round $r$ or later saves no additional computation, regardless of the remaining debate depth. The relevant quantity is therefore the \emph{incremental computation saved relative to the incumbent policy}, rather than the reduction from full-depth execution alone.
+
+We encountered this discrepancy while auditing a consensus-derived uncertainty signal for MAD. Under conventional full-depth evaluation, the signal appeared to save 33.9\% of computation. Yet sequential evaluation against consensus showed that it stopped earlier in none of the 4,500 debates, yielding 0.0\% incremental saving. Its apparent efficiency arose because the signal became favorable precisely when consensus was already satisfied. This finding motivates our central premise: \emph{adaptive stopping should be evaluated against the incumbent termination policy, not solely against full-depth execution}.
+
+Correcting the baseline, however, is only part of the problem. An adaptive policy must also identify unsafe states \emph{before} the incumbent terminates. Prior work on verification, critique, and reflection suggests that auxiliary evaluative agents can provide information beyond global agreement \cite{ref_11,ref_12,ref_13}. We therefore study critic-relative signals derived from critic confidence, verdicts, and critic--solver relationships. Crucially, we distinguish \emph{predictive discrimination} from \emph{operational value}: a signal may accurately identify unsafe states yet provide little benefit when the incumbent already stops cheaply, its remaining blind spot is small, or further debate rarely repairs errors. We therefore compare adaptive stopping with fixed-depth and self-consistency alternatives \cite{ref_10} to assess whether predictive gains translate into a genuine accuracy--cost advantage.
+
+The contributions of this paper are threefold:
+\begin{enumerate}[topsep=4pt,itemsep=4pt,parsep=0pt,partopsep=0pt]
+    \item We identify an incumbent-relative evaluation failure in which a stopping score reports 33.9\% apparent saving but removes 0.0\% of computation beyond the termination mechanism already in use. We introduce a four-part sequential evaluation protocol that measures actual savings relative to the incumbent.
+
+    \item We introduce seven critic-relative stopping features based on critic confidence, verdicts, and critic--solver relations. Under corrected evaluation, CRITIC-7 improves ROC-AUC from 0.705 to 0.729, and the resulting two-stage cascade achieves substantial token reduction on MMLU without a statistically detectable accuracy change.
+
+    \item We distinguish predictive discrimination from operational value by comparing adaptive stopping with consensus, fixed-depth execution, and no-debate baselines. The results identify three empirical conditions associated with when adaptivity provides useful computational savings.
+\end{enumerate}
+
+\section{Related Work}
+
+\textbf{Multi-agent debate and adaptive termination.}
+Multi-agent debate uses interactions among multiple LLM agents to improve reasoning and factual reliability. Early work showed that iterative debate can refine answers through cross-agent critique \cite{ref_1}, while subsequent studies explored divergent prompting \cite{ref_2}, confidence-aware aggregation \cite{ref_3}, alternative communication structures \cite{ref_4}, truth elicitation \cite{ref_5}, and debate-based evaluation \cite{ref_6}. Despite these advances, most MAD protocols either run for a predefined number of rounds or terminate upon agent convergence, with evaluation centered primarily on final-answer quality. The computational dimension remains less explored: when a system already employs a termination rule, the relevant benefit of adaptive stopping is the \emph{additional} computation saved beyond that incumbent, rather than savings measured only against maximum-depth execution.
+
+The closest setting to ours is adaptive stability detection for LLM judges \cite{ref_9}, which models evolving judge decisions with a time-varying Beta--Binomial process and stops inference upon convergence. Our setting differs in two respects. First, we treat the existing termination mechanism as an explicit incumbent and evaluate whether a candidate policy stops \emph{before} it, avoiding savings that arise only from comparison with full-depth execution. Second, rather than relying solely on global consensus dynamics, we study critic-relative signals that may reveal residual risk before the incumbent termination condition is met.
+
+\textbf{Verification, reflection, and self-consistency.}
+A related line of work improves LLM reliability through explicit verification rather than inter-agent convergence. Validator agents can inspect reasoning trees \cite{ref_11}, verbal feedback can support iterative self-correction \cite{ref_12}, and key-condition verification can identify and repair reasoning failures \cite{ref_13}. These studies demonstrate the value of auxiliary evaluators, but primarily use verification to trigger continuation or revision rather than asking whether graded critic information provides operational value beyond an existing stopping policy. We instead use critic confidence, verdicts, and critic--solver relations as signals of residual risk in the current debate state.
+
+Self-consistency provides an important comparison because debate is not the only way to allocate additional inference-time computation. Independent samples can be aggregated by majority voting to improve reasoning without cross-agent communication \cite{ref_10}. We therefore evaluate independently executed self-consistency and symmetric majority voting as explicit no-debate baselines, rather than treating them as equivalent to the first round of a heterogeneous debate. This enables a direct comparison between transcript-dependent adaptivity and simpler uses of the same inference budget.
+
+Broader surveys identify coordination, communication, specialization, and reliability as central dimensions of LLM-based multi-agent systems \cite{ref_7,ref_8,ref_14,ref_15}. Yet adaptive debate remains less studied from an operational perspective: whether stopping removes computation beyond an incumbent policy, and whether its predictive signals improve the accuracy--cost trade-off over strong fixed-depth or no-debate alternatives. We address these gaps through incumbent-aware sequential evaluation of consensus- and critic-derived stopping signals against both adaptive and non-adaptive baselines.
+
+\section{Methodology}
+
+\subsection{Problem Formulation}
+
+For each question $q$, a debate proceeds for up to $R$ rounds, indexed by $r=0,\ldots,R-1$. At round $r$, the system aggregates the three agents' current answers into a committed answer $a_r$, with $y_r=1$ if $a_r$ matches the ground truth and $y_r=0$ otherwise. A stopping rule observes the debate history up to round $r$ and decides whether to stop and return $a_r$. We consider two simple reference policies: \emph{consensus stopping}, the incumbent policy that stops when all three agents agree, and \emph{fixed-$k$}, which always stops after $k$ rounds. For an uncertainty-based policy with score $u_r$, stopping occurs at the first round satisfying $u_r<T$. Importantly, computational savings are measured relative to the incumbent policy: a new rule saves computation only when it stops earlier than consensus, not merely when its stopping condition is triggered.
+
+\subsection{System and Debate Protocol}
+
+Three agents participate: two solvers and one critic (Fig.~\ref{fig:arch}). At round $r$, both solvers answer using critic messages from rounds $0\dots r-1$, then the critic issues confidence-weighted verdicts --- four model calls per round. The committed answer $a_r$ is the majority of the three current answers, with confidence as tie-breaker; consensus means all three agree.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/fig_architecture.pdf}
+    \caption{\textbf{Overview of the adaptive stopping and evaluation framework.}
+    A six-round multi-agent debate produces round-level answers, confidences, critic verdicts, and reasoning traces. DUS-4 and CRITIC-7 features are combined into DUS-11 to estimate stopping uncertainty, with thresholds calibrated on held-out data. The resulting policy is evaluated sequentially against incumbent consensus stopping, where only earlier termination counts as computational saving.}
+    \label{fig:arch}
+\end{figure*}
+
+The stopping rule we deploy is a two-stage cascade. \textbf{Stage 1 (round 0)} replaces the critic's cached answer with the majority of three independent self-consistency samples; if the resulting score clears threshold $T$, the debate halts before another solver call. \textbf{Stage 2} otherwise continues the debate and rechecks the same score each round; we call the score used at both stages ``DUS-11.'' Consensus-based early stopping is disabled during data collection, so every debate runs the full six rounds, reconstructing the standard system's behaviour exactly while retaining later rounds as counterfactual data for the sequential simulation described below.
+
+\subsection{Uncertainty Signals}
+
+Every round writes one record per agent: raw answer, normalised answer, self-reported confidence (clipped to $[0,1]$), and reasoning text; the critic's record additionally carries its verdict and confidence on each solver. All eleven signals in Table~\ref{tab:signals} are computed offline from these records at no extra model-call cost. 
+
+\begin{table}[t]
+\caption{Uncertainty signals: DUS-4 (consensus-dynamics) and CRITIC-7 (critic-relative). Three CRITIC-7 features (2, 4, 7) still depend on how the critic's answer relates to the solvers'; they are independent of the specific consensus feature the incumbent is evaluated against, not of agreement in general.}
+\label{tab:signals}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}lcllc@{}}
+\toprule
+\textbf{Family} & \textbf{\#} & \textbf{Signal} & \textbf{Definition} & \textbf{Range} \\
+\midrule
+\multirow{4}{*}{\shortstack[l]{\textbf{DUS-4}\\(Consensus)}} & 1 & answer\_entropy & Shannon entropy (base 2) over $\{a^A, a^B, a^C\}$ & $\{0, 0.918, 1.585\}$ \\
+& 2 & confidence\_variance & Population variance of $\{c^A, c^B, c^C\}$ & $[0, 2/9]$ \\
+& 3 & disagreement\_persistence & Cumulative count of rounds $0\dots r$ without consensus & $\{0, 1, \dots\}$ \\
+& 4 & answer\_flip\_rate & Fraction of agents whose answer changed since $r-1$ & $\{0, 1/3, 2/3, 1\}$ \\
+\midrule
+\multirow{7}{*}{\shortstack[l]{\textbf{CRITIC-7}\\(Critic-relative)}} & 1 & verdict\_conf\_mean & $(v^A + v^B) / 2$ & $[0, 1]$ \\
+& 2 & n\_disagree & $|\{k\in\{A,B\} : a^k \neq a^C\}|$ & $\{0, 1, 2\}$ \\
+& 3 & verdict\_conf\_min & $\min(v^A, v^B)$ & $[0, 1]$ \\
+& 4 & critic\_vs\_majority & 1 if $a^C$ occurs exactly once among $\{a^A,a^B,a^C\}$ & $\{0, 1\}$ \\
+& 5 & critic\_conf & $c^C$ & $[0, 1]$ \\
+& 6 & conf\_gap\_critic\_solvers & $c^C - (c^A + c^B)/2$ & $[-1, 1]$ \\
+& 7 & critic\_alone & 1 if $a^A = a^B$ and $a^C \neq a^A$ & $\{0, 1\}$ \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+Signal 1 is decisive: it takes exactly three values, and 0 occurs precisely when consensus holds, so a score weighting it heavily inherits the incumbent's stopping condition rather than adding to it (Section~\ref{sec:circularity}).
+
+\subsection{Score Aggregation and Evaluation Protocol}
+\label{sec:protocols}
+
+We use two scoring models. \textbf{Model 1}, used only for the circularity audit in Section~\ref{sec:circularity}, is the original uncertainty model and assigns most of its weight (0.638) to answer entropy. 
+
+The four DUS-4 signals combined $x_{i,r}$ ($i=1,\dots,4$, Table~\ref{tab:signals}) as
+\begin{equation}
+\mathrm{DUS}_r = \sum_{i=1}^{4} w_i\, z_i(x_{i,r}), \qquad
+z_i(x) = \frac{x-\mu_i}{\sigma_i}, \qquad
+w_i = \frac{\max(\beta_i,0)}{\sum_{j=1}^{4}\max(\beta_j,0)}
+\label{eq:dus4}
+\end{equation}
+where $\beta_i$ are the coefficients of an $\ell_2$-regularized logistic regression fit to predict incorrectness from the standardized DUS-4 features, and negative coefficients are clipped to zero so that each retained component can only increase $\mathrm{DUS}_r$.
+
+From Section~\ref{sec:discrimination} onward, we use \textbf{Model 2}, a logistic regression over standardized DUS-11 features. It is trained only on non-final rounds to predict whether the answer committed at the current round would be incorrect.
+\begin{equation}
+u_r = \sigma\!\left(\beta_0+\sum_{i=1}^{11}\beta_i z_i\right),
+\qquad \sigma(t)=\frac{1}{1+e^{-t}}
+\label{eq:dus11}
+\end{equation}
+
+We evaluate stopping policies using an incumbent-aware protocol. Only non-final rounds are scored, and each round is labelled by the correctness of the answer it would commit. Savings are then measured by sequential simulation against consensus: if $i_c$ and $i_u$ denote the consensus and uncertainty-policy stopping rounds, respectively, the number of rounds saved is $\max(0,i_c-i_u)$. Thus, stopping at or after consensus provides no additional saving. Confidence intervals are computed by resampling at the question level. Thresholds are selected using five-fold nested cross-validation by question, with a fixed 70/20/10 split used as a confirmatory analysis.
+
+\subsection{Models, Benchmarks, and Run Configuration}
+
+We use three open-weight instruction-tuned LLMs from different model families: Qwen2.5-3B-Instruct and Llama3.2-3B as solvers (temperature 0.3), and Gemma3-4B as the critic (temperature 0.2). This setup provides heterogeneous solver behavior and a separate critic signal. All models are served locally in GGUF Q4\_K\_M format for controlled execution and token accounting. We evaluate on three benchmarks with different reasoning and answer structures: GSM8K for multi-step mathematical reasoning, MMLU for broad knowledge and four-choice reasoning, and StrategyQA for multi-hop binary reasoning. These settings allow us to examine stopping behavior under different forms of consensus. For each benchmark, we run 5 seeds with 300 questions per seed and up to six rounds. Consensus stopping is disabled during data collection to preserve complete trajectories for retrospective evaluation. In total, we collect 4,500 debates, 27,000 rounds, and 22,500 non-final rounds. Data are split 70/20/10 at the question level, with confidence intervals estimated from 2,000 question-clustered bootstrap resamples.
+
+\subsection{Baselines}
+\label{sec:baselines}
+
+We select baselines to compare adaptive stopping with full execution, practical termination policies, and no-debate inference. From the logged debates, we simulate \emph{always} (all six rounds), \emph{consensus} (the incumbent), \emph{fixed\_k} for $k=1,\ldots,5$, and an \emph{oracle} that stops at the first correct committed round. We also run \emph{majority voting}, using one independent sample from each of the three models, and \emph{self-consistency@3} \cite{ref_10} for each model as no-debate references. We do not treat \emph{fixed\_k1} as a no-debate baseline because it retains the heterogeneous prompts and sampling configuration of the debate system; therefore, all self-consistency comparisons use the separately executed runs.
+
+\subsection{Evaluation Metrics}
+
+We evaluate stopping rules from both predictive and operational perspectives. ROC-AUC is computed over non-final rounds, with an incorrect current committed answer as the positive class, and measures how well a score distinguishes rounds that are unsafe to stop. 
+\begin{equation}
+\mathrm{AUC} = \frac{R_\text{pos} - n_\text{pos}(n_\text{pos}+1)/2}{n_\text{pos}\, n_\text{neg}}
+\label{eq:auc}
+\end{equation}
+Operational performance is measured by final accuracy, token cost relative to running all six rounds, and paired $\Delta$Accuracy and $\Delta$Token against the consensus incumbent. The paired comparison with consensus is our primary measure of deployment value: ROC-AUC evaluates the quality of the stopping signal, whereas accuracy and token savings determine whether using that signal actually improves the accuracy--cost trade-off.
+
+\section{Results}
+
+\subsection{Circularity of Naive Stopping Evaluation}
+\label{sec:circularity}
+
+Fitting DUS-4 directly --- scoring every round of every debate and labelling by final correctness --- concentrates weight on one feature (answer\_entropy: 0.638) and reports \textbf{33.9\%} of rounds flagged as saved, at an in-budget 4.85\% per-round error. A sequential audit against the incumbent tells a different story (Table~\ref{tab:audit}): of 4,500 debates, the flag fires in 1,517, yet in 0 of 4,500 does it fire \textit{before} the consensus round already would have stopped. Rounds actually elided: 0 of 14,987 (0.0\%).
+
+\begin{table}[t]
+\centering
+\caption{Direct vs. Sequential Audit}
+\label{tab:audit}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Quantity} & \textbf{Direct protocol} & \textbf{Sequential audit} \\
+\midrule
+Rounds flagged ``stop'' & \textbf{33.9\%} & --- \\
+Error rate & 4.85\%/round & 5.09\%/debate \\
+Debates where flag fires & --- & 1,517 / 4,500 \\
+Rounds executed & --- & 14,987 \\
+\textbf{Debates stopping earlier} & --- & \textbf{0 / 4,500 (0.0\%)} \\
+\textbf{Rounds actually elided} & --- & \textbf{0 / 14,987 (0.0\%)} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.8\textwidth]{figures/fig2_circularity.png}
+    \caption{Uncertainty score by consensus status, with the threshold selected by the direct evaluation protocol.}
+    \label{fig:circularity}
+\end{figure*}
+
+The saving was circular, not merely optimistic: answer\_entropy is exactly zero whenever consensus holds, so the direct protocol's threshold sits exactly at the boundary consensus already enforces (Fig.~\ref{fig:circularity}). Stop rate, per-round error, and even a respectable-looking threshold all passed this check; only sequential simulation against the incumbent caught it.
+
+\subsection{Signal Discrimination and Operational Stopping}
+\label{sec:discrimination}
+
+Scoring only non-final rounds and labelling each by what it would itself commit, the strongest individual critic-relative signals --- verdict\_conf\_mean (AUC displacement 0.191) and n\_disagree (0.190) --- are on par with answer\_entropy (0.194), while confidence\_variance, one of our own four consensus signals, is nearly uninformative (AUC 0.533). At the family level (Table~\ref{tab:auc_merged}), CRITIC-7 beats DUS-4 (0.729 vs.\ 0.705, paired $\Delta$AUC $+0.024$, $p=0.002$); adding DUS-4 back to CRITIC-7 changes AUC by only $+0.007$ with a CI including zero, so agreement features are both confounded with the incumbent and largely redundant once critic-relative features are present.
+
+\begin{table}[t]
+\caption{AUC by feature family (nested-CV; paired $\Delta$AUC vs.\ DUS-4 from 2,000 question-clustered bootstrap resamples). AUC and $\Delta$AUC are each rounded independently to three decimal places from unrounded results; subtracting the displayed AUC values may therefore differ from the displayed $\Delta$AUC by up to 0.001.}
+\label{tab:auc_merged}
+\centering
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Feature family} & \textbf{AUC [95\% CI]} & \textbf{$\Delta$AUC vs.\ DUS-4} & \textbf{$p$} \\
+\midrule
+DUS-4 (consensus) & 0.705 [0.671, 0.737] & --- & --- \\
+\textbf{CRITIC-7 (critic-relative)} & \textbf{0.729} [0.703, 0.757] & \textbf{+0.024} [+0.007, +0.042] & 0.002 \\
+DUS-11 (union) & 0.736 [0.707, 0.764] & +0.031 [+0.021, +0.043] & $<$0.001 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Discrimination also varies substantially across benchmarks: held-out-fold AUC is 0.875 on GSM8K, 0.685 on MMLU, and 0.609 on StrategyQA. High discrimination does not automatically translate into earlier stopping: the cascade stops before consensus in \textbf{57.9\%} of MMLU debates, compared with \textbf{13.9\%} on GSM8K and \textbf{10.6\%} on StrategyQA. This benchmark variation motivates the accuracy--cost analysis below.
+
+\subsection{Accuracy--Cost Trade-off and Source of Savings}
+\label{sec:tradeoff}
+
+\begin{table}[t]
+\caption{Policy comparison against consensus (4,500 debates; accuracy / tokens as \% of \textit{always}; $\Delta$Acc is the paired accuracy difference vs.\ consensus; $\Delta$Token is the \emph{relative} token reduction vs.\ consensus, i.e.\ (consensus\% $-$ policy\%)/consensus\%, not a percentage-point difference).}
+\label{tab:all_policies}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+\textbf{Policy} & \textbf{GSM8K} & \textbf{MMLU} & \textbf{StrategyQA} & \textbf{$\Delta$Acc} & \textbf{$\Delta$Token} \\
+\midrule
+always (6 rounds) & 0.779 / 100.0\% & 0.547 / 100.0\% & 0.686 / 100.0\% & --- & --- \\
+best SC@3 baseline\textsuperscript{*} & 0.780 / 12.7\% & 0.582 / 11.1\% & 0.679 / 8.4\% & --- & --- \\
+fixed\_k2 & 0.797 / 33.3\% & 0.540 / 33.3\% & 0.698 / 33.3\% & n.s. & cheaper \\
+consensus (incumbent) & 0.785 / 56.0\% & 0.546 / 68.2\% & 0.691 / 48.5\% & --- & --- \\
+\textbf{DUS-11 cascade} & 0.786 / 52.2\% & 0.547 / 40.2\% & 0.694 / 47.5\% & $+0.001$ to $+0.003$ & $-6.8$\% / $\mathbf{-41.1\%}$ / $-2.1$\% \\
+\bottomrule
+\multicolumn{6}{@{}l}{\textsuperscript{*}Best per-benchmark self-consistency@3 model (varies by benchmark; see text). Symmetric}\\
+\multicolumn{6}{@{}l}{majority voting is a separate no-debate baseline and is not necessarily dominated by this row.}
+\end{tabular}%
+}
+\end{table}
+
+Against consensus, cascade accuracy differences range from $+0.001$ to $+0.003$ ($+0.001$ GSM8K, $+0.001$ MMLU, $+0.003$ StrategyQA), with CIs covering zero --- no statistically detectable accuracy change --- while token cost drops by \textbf{41.1\%} on MMLU, 6.8\% on GSM8K, and 2.1\% on StrategyQA (the latter two within seed variation). Judged only against consensus, the cascade looks like a clear win on MMLU. However, fixed\_k2 is cheaper than the cascade on all three benchmarks at statistically indistinguishable accuracy, and deeper fixed depths ($k=3,4,5$) show no consistent advantage over $k=2$. The oracle upper bound remains 7--14 accuracy points above all debate policies, and no-debate baselines vary by up to 29 points across models and benchmarks, so baseline choice matters more than transcript use.
+
+To examine whether this advantage persists beyond a single operating point, Fig.~\ref{fig:frontier} compares the DUS-11 cascade across stopping thresholds with independently executed self-consistency across sampling budgets.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{figures/fig4_cascade_vs_sc_frontier.png}
+    \caption{\textbf{Accuracy--cost frontier of adaptive stopping and self-consistency.}
+    The DUS-11 cascade is evaluated across stopping thresholds and compared with independently executed self-consistency across sampling budgets on GSM8K, MMLU, and StrategyQA. The comparison shows whether adaptive stopping provides an accuracy--cost advantage beyond simpler no-debate inference.}
+    \label{fig:frontier}
+\end{figure*}
+
+Across the evaluated operating points, the cascade does not dominate the self-consistency frontier, indicating that improved stopping discrimination does not necessarily translate into an operational advantage over simpler inference strategies.
+
+Almost all of the cascade's saving is a one-time, round-0 decision rather than continuous monitoring: an ablation isolating the Stage-1 self-consistency gate shows it alone accounts for \textbf{73.3--83.8\%} of earlier-than-consensus stops and matches or beats the full cascade's token cost on its own, with accuracy within 0.006 of the full cascade (round-0 firing rate is stable across seeds, coefficient of variation 1.9--10.5\%). Continued monitoring in later rounds (Stage 2) is the most expensive part of the cascade and adds little additional saving.
+
+\subsection{When Does Adaptive Stopping Pay?}
+\label{sec:quantities}
+
+\begin{table}[t]
+\caption{Synthesis of conditions associated with adaptive stopping value. Blind spot denotes the error rate among unanimous rounds; consensus cost is relative to \textit{always}; Net is rescue minus corruption from continuing beyond round 0 (McNemar $p$-value in parentheses); adaptive saving is the relative token reduction versus consensus.}
+\label{tab:synthesis}
+\centering
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+\textbf{Benchmark} & \textbf{Blind spot} & \textbf{Consensus cost} & \textbf{Net} & \textbf{AUC} & \textbf{Adaptive saving} \\
+\midrule
+GSM8K & 2.9\% & 56.0\% & $-8$ ($p=0.516$) & 0.875 & $-$6.8\% \\
+StrategyQA & 24.4\% & 48.5\% & $+5$ ($p=0.764$) & 0.609 & $-$2.1\% \\
+\textbf{MMLU} & \textbf{28.0\%} & \textbf{68.2\%} & \textbf{+26} ($p=0.074$) & 0.685 & \textbf{$-$41.1\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Net rescue-minus-corruption from continuing debate past round 0 is not statistically distinguishable from zero on any benchmark (McNemar $p=0.516$ GSM8K, $p=0.074$ MMLU, $p=0.764$ StrategyQA). Adaptive saving instead tracks the room left by the incumbent rather than predictive discrimination alone: GSM8K has the highest AUC (0.875) but little saving because consensus already costs only 56.0\% of full execution and has a 2.9\% blind spot, whereas MMLU combines a lower AUC (0.685) with an expensive consensus policy (68.2\%) and a 28.0\% blind spot, leaving substantially more computation to remove. These results suggest three conditions for adaptive stopping to provide value: (i) the incumbent leaves sufficient reducible computation, (ii) it retains a non-trivial correctness blind spot, and (iii) continued debate repairs more errors than it introduces. GSM8K lacks the first two conditions, while StrategyQA shows little evidence for the third ($+5$ net repairs, $p=0.764$). MMLU is the only benchmark whose point estimates align with all three, but its net-repair advantage remains non-significant ($+26$, $p=0.074$), so this evidence is suggestive rather than conclusive.
+
+\section{Conclusion}
+We draw three main conclusions. First, stopping rules must be evaluated against the incumbent rather than full-depth execution: our initial score reported 33.9\% apparent saving but yielded exactly 0.0\% when evaluated sequentially against consensus. Second, critic-relative signals provide stronger discrimination than consensus-dynamics features, and the resulting cascade reduces MMLU token cost by 41.1\% without a statistically detectable accuracy change. Third, predictive value does not guarantee operational value: a fixed two-round policy is statistically indistinguishable from the cascade in accuracy and cheaper on all three benchmarks. Our results therefore suggest that adaptivity is most useful when the incumbent leaves substantial reducible computation, retains meaningful correctness blind spots, and continued debate provides a meaningful net repair benefit.
+
+Several limitations bound these findings. We study two 3B solvers and one fixed 4B critic across three benchmarks, so the value of critic-relative signals under larger models, multiple critics, or alternative debate topologies remains unknown. Thresholds are selected separately by benchmark using nested cross-validation, leaving cross-benchmark and cross-model transfer untested. Moreover, confidence intervals for paired accuracy differences span roughly 1--3 points, so the absence of a statistically detectable difference should not be interpreted as evidence of exact equality.
+
+The broader question is whether transcript-derived adaptive signals can outperform strong fixed-depth execution when evaluated sequentially against an incumbent. Future work should examine larger and multiple critics, alternative interaction topologies, and transferable stopping policies under the same incumbent-aware evaluation. Complete logs for all 4,500 debates and 27,000 rounds, together with both evaluation protocols and analysis code, are released.
+
+
+
+\begin{thebibliography}{15}
+
+\bibitem{ref_1} Du Y., Li S., Torralba A., Tenenbaum J.B., Mordatch, I.: Improving factuality and reasoning in language models through multiagent debate. In: Proc. Int. Conf. Machine Learning (ICML) (2024)
+
+\bibitem{ref_2} Liang T., He Z., Jiao W., Wang X., Wang Y., Wang R., Yang Y., Shi S., Tu Z.: Encouraging divergent thinking in large language models through multi-agent debate. In: Proc. Conf. Empirical Methods in Natural Language Processing (EMNLP) (2024)
+
+\bibitem{ref_3} Chen J.C.-Y., Saha S., Bansal M.: ReConcile: Round-table conference improves reasoning via consensus among diverse LLMs. In: Proc. Annu. Meeting Assoc. Computational Linguistics (ACL) (2024)
+
+\bibitem{ref_4} Yin Z., Sun Q., Chang C., Guo Q., Dai J., Huang X., Qiu X.: Exchange-of-Thought: Enhancing large language model capabilities through cross-model communication. In: Proc. Conf. Empirical Methods in Natural Language Processing (EMNLP) (2023)
+
+\bibitem{ref_5} Khan A., Hughes J., Valentine D., Ruis L., Sachan K., Radhakrishnan A., Grefenstette E., Bowman S.R., Rocktäschel T., Perez E.: Debating with more persuasive LLMs leads to more truthful answers. In: Proc. Int. Conf. Machine Learning (ICML) (2024)
+
+
+\bibitem{ref_6} Chan C.-M., Chen W., Su Y., Yu J., Xue W., Zhang S., Fu J., Liu Z.: ChatEval: Towards better LLM-based evaluators through multi-agent debate. In: Proc. Int. Conf. Learning Representations (ICLR) (2024)
+
+\bibitem{ref_7} Guo T., Chen X., Wang Y., Chang R., Pei S., Chawla N.V., Wiest O., Zhang X.: Large language model based multi-agents: A survey of progress and challenges. In: Proc. Int. Joint Conf. Artificial Intelligence (IJCAI) (2024)
+
+\bibitem{ref_8} Tran K.-T., Dao D., Nguyen M.-D., Pham Q.-V., O'Sullivan B., Nguyen H.D.: Multi-agent collaboration mechanisms: A survey of LLMs. arXiv preprint (2025)
+
+\bibitem{ref_9} Hu T., Tan Z., Wang S., Qu H.: Multi-agent debate for LLM judges with adaptive stability detection. arXiv preprint (2025)
+
+\bibitem{ref_10} Wang X., Wei J., Schuurmans D., Le Q., Chi E., Narang S., Chowdhery A., Zhou D.: Self-consistency improves chain of thought reasoning in language models. In: Proc. Int. Conf. Learning Representations (ICLR) (2023)
+
+
+\bibitem{ref_11} Haji F., Bethany M., Tabar M., Chiang,  J., Rios,  A.: Improving LLM reasoning with multi-agent tree-of-thought validator agent. arXiv preprint (2024)
+
+\bibitem{ref_12} Shinn N., Cassano F., Berman E., Gopinath A., Narasimhan K., Yao S.: Reflexion: Language agents with verbal reinforcement learning. In: Advances in Neural Information Processing Systems (NeurIPS) (2023)
+
+\bibitem{ref_13} Wu Z., Zeng Q., Zhang Z., Tan Z., Shen C., Jiang M.: Large language models can self-correct with key condition verification. In: Proc. Conf. Empirical Methods in Natural Language Processing (EMNLP) (2024)
+
+
+\bibitem{ref_14} Chen S., Liu Y., Han W., Zhang W., Liu T.: A survey on LLM-based multi-agent system: Recent advances and new frontiers in application. arXiv preprint (2024)
+
+\bibitem{ref_15} Zhao W.X., Zhou K., Li J. et al.: A Survey of Large Language Models. Front. Comput. Sci. 20, 2012627 (2026).
+
+
+
+\end{thebibliography}
+
+
+\end{document}

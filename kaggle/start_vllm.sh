@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Start / stop the vLLM servers used by config/vllm/*.yaml on a Kaggle "GPU T4 x2" machine.
 #
-#   bash kaggle/start_vllm.sh debate    # solver A + solver B on GPU 0, critic on GPU 1
+#   bash kaggle/start_vllm.sh debate    # solver A + solver B on GPU 0, critic (Mistral-7B) on GPU 1
 #   bash kaggle/start_vllm.sh verify    # verifier on GPU 0 (run after `stop`)
 #   bash kaggle/start_vllm.sh stop      # kill every vLLM server
-#   CRITIC=mistral bash kaggle/start_vllm.sh debate   # if Gemma-2 fails to load on T4
 #
 # T4 = 16 GB, compute capability 7.5: fp16 only (no bf16), AWQ 4-bit fits two 7-8B models per GPU.
+# Gemma-2 cannot be the critic here: vLLM refuses it in fp16 (numerical instability) and it does
+# not fit in fp32, so the critic is Mistral-7B-v0.3.
 # Two servers on one GPU each get a fixed share of its memory (--gpu-memory-utilization), and
 # are started one after the other because vLLM measures free memory at start-up.
 # Logs: logs/vllm_<port>.log.  Tune with MAXLEN (context length) and MAXSEQS (batch size).
@@ -36,11 +37,7 @@ case "${1:-}" in
   debate)
     start Qwen/Qwen2.5-7B-Instruct-AWQ 0 8001 0.45; wait_up 8001
     start hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4 0 8002 0.45; wait_up 8002
-    if [ "${CRITIC:-gemma}" = "mistral" ]; then
-      start solidrust/Mistral-7B-Instruct-v0.3-AWQ 1 8003 0.85; wait_up 8003
-    else
-      start hugging-quants/gemma-2-9b-it-AWQ-INT4 1 8003 0.85; wait_up 8003
-    fi
+    start solidrust/Mistral-7B-Instruct-v0.3-AWQ 1 8003 0.85; wait_up 8003
     ;;
   verify)
     start stelterlab/phi-4-AWQ 0 8004 0.85; wait_up 8004

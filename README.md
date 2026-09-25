@@ -102,11 +102,11 @@ Ollama xử lý từng request một; trên Kaggle nên dùng vLLM (server tươ
 # 0) Notebook: Accelerator = GPU T4 x2, Internet = On
 pip install -q vllm pyyaml scipy scikit-learn pandas pyarrow requests
 
-# 1) debate: Qwen2.5-7B + Llama-3.1-8B trên GPU 0, Gemma-2-9B trên GPU 1 (đều AWQ 4-bit)
-bash kaggle/start_vllm.sh debate            # nếu Gemma-2 không chạy được trên T4: CRITIC=mistral bash kaggle/start_vllm.sh debate
+# 1) debate: Qwen2.5-7B + Llama-3.1-8B trên GPU 0, Mistral-7B-v0.3 (critic) trên GPU 1 (đều AWQ 4-bit)
+bash kaggle/start_vllm.sh debate
 python MAD.py --task gsm8k --n 600 --seed 1 --stop none --workers 16 \
     --solver_a_config config/vllm/solver_qwen.yaml --solver_b_config config/vllm/solver_llama.yaml \
-    --critic_config config/vllm/critic_gemma.yaml --log_root results/logs_osc
+    --critic_config config/vllm/critic_mistral.yaml --log_root results/logs_osc
 
 # 2) verifier (Phi-4, khác họ với cả ba debater)
 bash kaggle/start_vllm.sh stop && bash kaggle/start_vllm.sh verify
@@ -114,6 +114,8 @@ python -m osc.verify_offline --logs "results/logs_osc/**/debate_full_*.jsonl" --
     --verifier_config config/vllm/verifier_phi4.yaml --workers 16 --out results/verify/gsm8k_reasoning.jsonl
 ```
 
+- Không dùng Gemma-2 làm critic trên T4: vLLM từ chối Gemma-2 ở fp16 ("numerical instability"), T4 không có bf16, và bản fp32 không vừa bộ nhớ.
+- `MAD.py` và `osc.verify_offline` kiểm tra mọi server vLLM trong config trước khi chạy, và dừng ngay nếu server chưa lên hoặc đang chạy model khác. `MAD.py` cũng dừng nếu mọi câu của một task đều lỗi.
 - Mọi thứ sau bước 2 (`osc.train`, `osc.evaluate`, `baselines.stopping`) chạy trên CPU, không cần GPU.
 - Phiên Kaggle tối đa 12 giờ và thư mục làm việc bị xoá khi hết phiên. Lưu `results/` làm output của notebook, phiên sau chép lại vào rồi chạy tiếp với `--resume`.
 - Trước khi chạy lớn, thử `--n 20` để đo thời gian mỗi câu, rồi nhân lên cho đủ số câu cần.

@@ -1,6 +1,6 @@
 model:
   provider: ollama
-  name: gemma2:9b
+  name: Mistral-7B-Instruct-v0.3-AWQ
   temperature: 0.3
   max_tokens: 1024
   top_p: 1.0

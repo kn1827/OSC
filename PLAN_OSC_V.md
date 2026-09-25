@@ -296,7 +296,7 @@ K_n = Π_{i≤n} (1 + μ_i (L'_i − ε)),     μ_i ∈ [0, 1/ε], chỉ phụ t
 
   | | Solver A | Solver B | Critic | Verifier | Chạy ở đâu |
   |---|---|---|---|---|---|
-  | Kaggle, miễn phí (mặc định) | Qwen2.5-7B-Instruct | Llama-3.1-8B-Instruct | Gemma-2-9B-it (dự phòng: Mistral-7B-v0.3) | Phi-4 14B | vLLM, AWQ 4-bit, 2×T4 (`config/vllm/`, `kaggle/start_vllm.sh`) |
+  | Kaggle, miễn phí (mặc định) | Qwen2.5-7B-Instruct | Llama-3.1-8B-Instruct | Mistral-7B-Instruct-v0.3 (Gemma-2 không chạy fp16 trên T4) | Phi-4 14B | vLLM, AWQ 4-bit, 2×T4 (`config/vllm/`, `kaggle/start_vllm.sh`) |
   | Qua API, trả phí | GPT-4o-mini | DeepSeek | Llama-3.3-70B (Groq/OpenRouter) | model khác họ | provider `chatgpt` / `deepseek` / `groq` / `openrouter` có sẵn |
 
   Llama-3.3-70B không chạy được trên GPU Kaggle (bản 4-bit cần khoảng 40GB, 2×T4 chỉ có 32GB). Verifier nên khác họ với cả ba debater để τ₀ thấp.

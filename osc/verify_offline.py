@@ -114,6 +114,8 @@ def main():
     ap.add_argument("--workers", type=int, default=1, help="parallel calls (API providers)")
     args = ap.parse_args()
 
+    from src.agents.base_agent import check_vllm_server
+    check_vllm_server(args.verifier_config)
     benchmark = get_benchmark(args.task)
     jobs = collect_pairs(args.logs, args.task, args.max_questions)
     done = done_keys(args.out)

@@ -29,6 +29,14 @@ def _in_repo(fn):
 class _FakeVLLM(BaseHTTPRequestHandler):
     requests = []
 
+    def do_GET(self):
+        data = json.dumps({"data": [{"id": "org/model-AWQ"}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         _FakeVLLM.requests.append((self.path, body))
@@ -81,6 +89,33 @@ def test_vllm_provider_sends_openai_request_with_seed():
                 pass
             else:
                 raise AssertionError("a 400 must raise at once, not retry")
+    finally:
+        srv.shutdown()
+
+
+def test_check_vllm_server_catches_dead_or_wrong_server():
+    import socket
+    from src.agents.base_agent import check_vllm_server
+    srv = _serve()
+    with socket.socket() as s:  # a port nobody listens on
+        s.bind(("127.0.0.1", 0))
+        dead_port = s.getsockname()[1]
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            def cfg(name, port):
+                path = os.path.join(d, f"{port}_{name.replace('/', '_')}.yaml")
+                with open(path, "w") as f:
+                    f.write(f"model:\n  provider: vllm\n  name: {name}\n"
+                            f"  base_url: http://127.0.0.1:{port}/v1\n")
+                return path
+            check_vllm_server(cfg("org/model-AWQ", srv.server_port))
+            for bad in (cfg("org/other-model", srv.server_port), cfg("org/model-AWQ", dead_port)):
+                try:
+                    check_vllm_server(bad)
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError(f"{bad} must fail the pre-flight check")
     finally:
         srv.shutdown()
 

@@ -9,6 +9,28 @@ def load_model_config(path: str = "config/model_config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
+def check_vllm_server(config_path: str) -> None:
+    """Fail fast if a vLLM config points at a server that is down or serves another model.
+
+    Without this, a dead server only shows up as one "vLLM failed after 5 retries" per question,
+    and a whole run finishes with empty logs. Configs of other providers are not checked."""
+    model_cfg = load_model_config(config_path)["model"]
+    if model_cfg.get("provider") not in ("vllm", "openai_compatible"):
+        return
+    base = (model_cfg.get("base_url") or os.environ.get("VLLM_BASE_URL")
+            or "http://localhost:8000/v1").rstrip("/")
+    try:
+        resp = requests.get(f"{base}/models", timeout=10)
+        resp.raise_for_status()
+        served = [m["id"] for m in resp.json().get("data", [])]
+    except (requests.RequestException, ValueError, KeyError) as e:
+        raise RuntimeError(f"{config_path}: no vLLM server at {base} ({e}). "
+                           f"Start it (kaggle/start_vllm.sh) and check logs/vllm_<port>.log") from e
+    if model_cfg["name"] not in served:
+        raise RuntimeError(f"{config_path}: server at {base} serves {served}, "
+                           f"not {model_cfg['name']}")
+
+
 class BaseAgent:
     def __init__(self, role: str, config_path: str = "config/model_config.yaml"):
         self.role = role

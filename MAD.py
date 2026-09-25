@@ -164,6 +164,10 @@ def run_task(task: str, n: int, max_rounds: int, seed: int, resume: bool, stop_p
     print(f"\n[{task}] DONE — {n_done} câu, accuracy={n_correct}/{n_done} "
           f"({(n_correct/n_done*100 if n_done else 0):.1f}%)")
     print(f"  full log : {jsonl_path}")
+    if samples and n_done == 0:
+        # every question failed (e.g. a model server died mid-run): stop instead of moving on
+        # to the next task with the same broken setup
+        raise RuntimeError(f"[{task}] all {len(samples)} questions failed — see the errors above")
 
 
 def main():
@@ -223,6 +227,9 @@ def main():
 
     tasks = ALL_TASKS if args.task == "all" else [args.task]
     configs = (args.solver_a_config, args.solver_b_config, list(args.critic_config))
+    from src.agents.base_agent import check_vllm_server
+    for cfg in [args.solver_a_config, args.solver_b_config, *args.critic_config]:
+        check_vllm_server(cfg)
     for task in tasks:
         if args.majority_voting:
             from baselines.no_debate import run_majority_vote_task

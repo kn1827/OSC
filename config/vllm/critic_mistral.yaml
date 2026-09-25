@@ -1,5 +1,5 @@
 # vLLM (OpenAI-compatible) config — started by kaggle/start_vllm.sh on port 8003.
-# Fallback critic (Mistral family), same port as critic_gemma.yaml.
+# Critic (Mistral family). Gemma-2 does not run on T4: vLLM refuses it in fp16.
 model:
   provider: vllm
   name: solidrust/Mistral-7B-Instruct-v0.3-AWQ
